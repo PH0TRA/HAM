@@ -30,26 +30,6 @@ import sys
 
 
 
-##script to supress all the alsa errors https://stackoverflow.com/questions/7088672/pyaudio-working-but-spits-out-error-messages-each-time
-from ctypes import *
-from contextlib import contextmanager
-
-ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
-
-def py_error_handler(filename, line, function, err, fmt):
-    pass
-
-c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
-
-@contextmanager
-def noalsaerr():
-    asound = cdll.LoadLibrary('libasound.so')
-    asound.snd_lib_error_set_handler(c_error_handler)
-    yield
-    asound.snd_lib_error_set_handler(None)
-
-# %%
-
 class AudioStream(object):
     def __init__(self, Workqueue):
         self.qdata=Workqueue
@@ -64,12 +44,9 @@ class AudioStream(object):
         self.min_sample=self.min_freq*self.CHUNK//self.RATE ##set underlimit of frequency
         
         # stream object
-        with noalsaerr():
-            self.p = pyaudio.PyAudio()
-
-
+        #with noalsaerr():
+        self.p = pyaudio.PyAudio()
         self.audiostream()
-      
         self.calculate_plot()
         
 
@@ -123,7 +100,7 @@ class AudioStream(object):
             now = datetime.now()
             seconds=float(now.strftime("%S.%f"))
             seq=int((seconds+1)//15) ##
-            if seq != last_seq and seq !=0:
+            if seq != last_seq and seq != 0:
                 wait=seq*15-seconds-3*0.16#-0.04##start 3 intervals before next sequence
                 if wait > 0:
                     self.p.close(self.stream)

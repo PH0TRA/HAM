@@ -22,7 +22,7 @@ W_CLK=18
 FQ_UD=23
 DATA=24
 RESET=25
-offset=0
+offset=450
 WORD1='00000001'#W0 multiplier6x, power up
 WORD0='00000101'#W0 power down, multiplier6x
 

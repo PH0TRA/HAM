@@ -2,11 +2,10 @@
 
 ##libraries
 import RPi.GPIO as GPIO
-import time
-import sys
-import spidev
-import argparse
-import re
+import spectra_analysis_FT8 as FT8
+import time, sys, spidev, argparse, re, threading, queue
+import socket  # Import socket module
+
 
 FT8_freq={  '160m' : '1840000',
             '80m' : '3573000',
@@ -21,7 +20,7 @@ FT8_freq={  '160m' : '1840000',
             '2m' : '144174000'
            }
 frequencies=[]
-
+qdata=queue.Queue(maxsize=7)
 
 ## set variables
 spi=spidev.SpiDev()
@@ -48,11 +47,11 @@ GPIO.setup(RESET,GPIO.OUT)
 #%%
 ##setup default values for registers
 multp=20
-offset=0 # in Hz from reference clock
+offset=294#-160 # in Hz from reference clock
 
 IBR=0b10000000#instruction byte read
 IBW=0b00000000#instruction byte wrtite
-CSR=0b11110010#0xF0 all channels, msb mode, 3 wire mode
+#CSR=0b11110010#0xF0 all channels, msb mode, 3 wire mode
 FR1a=0b11010000#bit[23:16]
 FR1b=0b00000000#'#bit[15:8]
 FR1c=0b00000000#bit[7:0]
@@ -61,9 +60,9 @@ FR2b=0b00000000#bit[7:0]
 CFRa=0b00000000#bit[23:16]
 CFRb=0b00000011#bit[15:8]
 CFRc=0b00000010#bit[7:0]
-ACRa=0b00000000#bit[23:16]
-ACRb=0b00010011#bit[15:8]
-ACRc=0b10000000#bit[7:0]
+#ACRa=0b00000000#bit[23:16]
+#ACRb=0b00010011#bit[15:8]
+#ACRc=0b10000000#bit[7:0]
 LSRRa=0b00000000#bit[15:8]
 LSRRb=0b00000000#bit[7:0]
 RDWa=0b00000000#bit[31:24]
@@ -78,7 +77,7 @@ FDWd=0b00000000#bit[7:0]
 
 #%% Functions
 
-def update():
+def UPDATE():
     GPIO.output(UPD,1) ##syncIO
     GPIO.output(UPD,0)
 
@@ -88,8 +87,8 @@ def AD9959(reg,word):
         'ACR':(0x06,2),'LSRR':(0x07,2),'RDW':(0x08,4),'FDW':(0x09,4)
         } 
     transfer=[regmap[reg][0]]+word
-    for i in transfer:
-        print('{0:08b}'.format(i))
+    #for i in transfer:
+    #    print('{0:08b}'.format(i))
     spi.xfer(transfer)
     return()
 
@@ -105,16 +104,40 @@ def READ(reg):
     byte=spi.readbytes(ln)
     return(byte)
 
+def CSR(ch):
+    csr = ((0b00010000 << ch) + 0b00000010) #shift channel bit
+    return([csr])
+
+def CFTW(freq,multp):
+    FTW=int((freq*2**32)/((25e06+offset)*multp))
+    f4 = int(FTW & 0xff) #split into four bytes: mask last 8 bits and shift
+    f3 = int((FTW >> 8) & 0xff) 
+    f2 = int((FTW >> 16) & 0xff)
+    f1 = int(FTW >> 24)
+    return([f1,f2,f3,f4])
+
+def ACR(power):
+    ACRc = int(power & 0xff)#bit[7:0]
+    ACRb = int(((power >> 8) & 0xff) + 0b00010000)#bit[15:8]
+    ACRa=0b00000000#bit[23:16]
+    return([ACRa,ACRb,ACRc])
+
 #%% Argument parser
 
 usage='Script to control Analog Devices AD9959'
 usage_freq='F0 to F3 frequency in Hz or standard FT8 frequency e.g. "14097100" or "10m". "K"(Hz) or "M"(Hz) may be used.' 
 usage_pow='power for each channel value 0-1023 default 1023'
+usage_host='IP device on which to listen. Default 0.0.0.0 allows any'
+usage_port='Port to connect to. Default 50,000'
+usage_FT8='Transmit on base frequency shifted with tone input via soundcard of WSJTX'
+usage_TCP='Control Analog Devices AD9851 via TCP. This is the client. Use remote host'
+
 p=argparse.ArgumentParser(description=usage)
 
-p.add_argument('-f','--FT8', action='store_true', dest='FT8',
-             help='Transmit on base frequency shifted with tone input of WSJTX'
-             )
+p.add_argument('-f','--FT8', action='store_true', dest='FT8',help=usage_FT8)
+p.add_argument('-t','--TCP', action='store_true', dest='TCP',help=usage_TCP)			 
+p.add_argument('-i','--interface', action='store', dest='host', help=usage_host, default='0.0.0.0', type=str)
+p.add_argument('-p','--port', action='store', dest='port', help=usage_port, default='50000', type=int)			 
 p.add_argument('frequencies', metavar='F', nargs=4, help=usage_freq)
 
 p.add_argument('power0', metavar='P0', nargs='?', help=usage_pow, default='1023', type=int)
@@ -151,189 +174,136 @@ print("Channel 3 set to: {0:,} Hz: power set to: {1:d}".format(frequencies[3],ou
 
 power=[output.power0, output.power1, output.power2, output.power3]
 
-#%% Reset and setup 
-GPIO.output(RESET,1)
-time.sleep(0.01)
-GPIO.output(RESET,0)
+port = output.port  # Reserve a port for your service every new transfer wants a new port or you must wait.
+host = output.host # 'localhost'  # Get local machine name
+s = socket.socket()  # Create a socket object
 
-#write FR1
-AD9959('FR1',[FR1a,FR1b,FR1c])
-
-#%% write each channel
-#write CSR
-
-for i in range(0,4):
-    CSR = ((0b00010000 << i) + 0b00000010) #shift channel bit
-    AD9959('CSR',[CSR])
-
-    ##write frequency
-    FTW=int((frequencies[i]*2**32)/((25e06+offset)*multp))
-    f4 = int(FTW & 0xff) #split into four bytes: mask last 8 bits and shift
-    f3 = int((FTW >> 8) & 0xff) 
-    f2 = int((FTW >> 16) & 0xff)
-    f1 = int(FTW >> 24)
-    AD9959('CFTW',[f1,f2,f3,f4])
-
-    # write ACR
-    ACRc = int(power[i] & 0xff)
-    ACRb = int(((power[i] >> 8) & 0xff) + 0b00010000)
-    #print(bin(ACRa))
-    #print(bin(ACRb))
-    #print(bin(ACRc))
-    AD9959('ACR',[ACRa,ACRb,ACRc])
-
-update()
-
-#%%
-status=READ('CFTW') #read current status of CSR byte
-for r in status:
-    print(r)
-    print('({0:08b})'.format(r))
+if __name__ == '__main__':
     
-##
-##GPIO.output(CSB,1)
-#exit()
+    #%% Reset and setup 
+    GPIO.output(RESET,1)
+    time.sleep(0.01)
+    GPIO.output(RESET,0)
 
-#%%
+    #write FR1
+    AD9959('FR1',[FR1a,FR1b,FR1c])
 
-#%%
-#cftw_int=0
-#CFTW='{0:032b}'.format(cftw_int) ##format in 32 bit
-#word=FR1a+FR1b+FR1c
-#print(WORD)
+    #%% write each channel
 
-#WORD='{0:024b}'.format(WORD) ##format in 32 bit
-#print(LENGTH["CSR"],"test")
-##FREQWORD='{0:016b}'.format(WORD)##format in 16 bit
-##print(FREQWORD)
+    for i in range(0,4):
+        ##write CSR
+        AD9959('CSR',CSR(i))
 
-
-
+        ##write frequency
+        AD9959('CFTW',CFTW(frequencies[i],multp))
         
-##        if int(SERIALWORD[i]):
-##            GPIO.output(DATA,1)
-##        GPIO.output(W_CLK,1)
-##        GPIO.output(DATA,0)
-##        GPIO.output(W_CLK,0)
+        # write ACR
+        AD9959('ACR',ACR(power[i]))
 
+    UPDATE()
 
-##
-##def reset():
-##    GPIO.output(RESET,1)
-##    GPIO.output(RESET,0)
-##    GPIO.output(W_CLK,1)
-##    GPIO.output(W_CLK,0)
-##    GPIO.output(FQ_UD,1)
-##    GPIO.output(FQ_UD,0)
-##
-##def AD9959(freq,WORD,symbol):
-##    if freq > 70000000:
-##        print('AD9851: frequency must be lower than 70 mHz',file=sys.stderr) 
-##        sys.exit(-1)
-##    freq_word_int=int((freq)*(2**32)/(6*30e6+offset)) ##6xrefclock turned on in WORD0 
-##    FREQWORD='{0:032b}'.format(freq_word_int)
-##    SERIALWORD=WORD+FREQWORD
-##    for i in range(39,-1,-1):
-##        GPIO.output(W_CLK,0)
-##        if int(SERIALWORD[i]):
-##            GPIO.output(DATA,1)
-##        GPIO.output(W_CLK,1)
-##        GPIO.output(DATA,0)
-##        GPIO.output(W_CLK,0)
-##    GPIO.output(FQ_UD,1)
-##    GPIO.output(FQ_UD,0)
-##    return()
-##
-##usage='wspr.py [options] callsign grid power[dBm] frequency1[Hz] <frequency2>...'
-##usage_freq='frequency in Hz or standard WSPR frequency e.g. "14097100" or "10m"' 
-##
-##p = OptionParser(usage=usage)
-##p.add_option('-n','--no-delay', action='store_true', dest='nowait',
-##             help='Transmit immediately, do not wait for a WSPR TX window. '+\
-##             ' Used for testing only'
-##             )
-##p.add_option('-r','--repeat', action='store_true', dest='repeat',
-##             help='Repeat endless untill ctrl-c is pressed'
-##             )
-##p.add_option('-o','--offset', action='store_true', dest='offset',
-##             help='Add a random offset between -80 and 80 Hz from center frequency'
-##             )
-##p.add_option('-t','--testtone', action='store_true', dest='tone',
-##             help='Simply output a test tone at the specified frequency. '+\
-##             'For debugging and to verify calibration'
-##             )
-##
-##
-##(opts, args) = p.parse_args()
-##
-##
-##if opts.tone:
-##    frequencies = args[0:len(args)]
-##else:
-##    try:
-##        callsign = args[0]
-##        grid = args[1]
-##        power =args[2]
-##        frequencies = args[3:len(args)]
-##    except:
-##        print('Malformed arguments.',file=sys.stderr)
-##        print(usage, file=sys.stderr)
-##        sys.exit(-1)
-## 
-##
-##    #frequency=int(frequency)    
-##    symbols=g.Genwsprcode(callsign,grid,power)
-##    symbols=symbols.rstrip(',')
-##    ##print('symbols\n',symbols)
-##    symbols=symbols.split(',')
-##
-##reset()
-##if not opts.nowait or not opts.tone:
-##    print('Waiting for next WSPR TX window...')
-##
-##
-##while True:
-##    for frequency in frequencies:  #get the frequencies from the list
-##        try:
-##            frequency=int(wspr_freq[frequency]) #get known WSPR frequency
-##        except:
-##            try:
-##                frequency=int(frequency) #else it must be an integer value
-##            except:
-##                print('Malformed frequency.',file=sys.stderr) 
-##                print(usage_freq, file=sys.stderr)
-##                sys.exit(-1)
-##        
-##        if not opts.nowait: # check wether nowait
-##            past_time_window = (time.time() % 120)
-##            time.sleep(120-past_time_window)
-##
-##        if frequency==0:
-##            print('Skipping transmission on:',time.strftime('%H:%M:%S',time.gmtime(time.time())))
-##            time.sleep(110)
-##        elif opts.tone:
-##            print('Start of test tone on:',time.strftime('%H:%M:%S',time.gmtime(time.time())))
-##            print('Frequency: {0:,.0f} Hz'.format(frequency))
-##            AD9851(frequency,WORD1,0)
-##            time.sleep(120)
-##            #AD9851(frequency,WORD0,0)
-##            reset()
-##            print('End of test tone on:',time.strftime('%H:%M:%S',time.gmtime(time.time())))
-##        else:
-##            if opts.offset:
-##                frequency=frequency+randrange(-80,81)
-##
-##            print('Start of transmission on:',time.strftime('%H:%M:%S',time.gmtime(time.time())))
-##            print('Frequency: {0:,.0f} Hz'.format(frequency))
-##
-##            for x in symbols: #modulate the symbols
-##                AD9851(frequency,WORD1,int(x))
-##                #print(x, end=',')
-##                time.sleep((1/freq_shift)-time.time() % (1/freq_shift))
-##            #AD9851(frequency,WORD0,int(x))
-##            reset()
-##            print('End of transmission on:',time.strftime('%H:%M:%S',time.gmtime(time.time())))
-##    if not opts.repeat:
-##        break
-##    
-##  
+    #%%
+##    status=READ('CFTW') #read current status of CSR byte
+##    for r in status:
+##        print(r)
+##        print('({0:08b})'.format(r))
+        
+    #%%
+    if output.FT8:
+        AD9959('CSR',CSR(0)) ##FT8 to channel 0!
+        AD9959('CFTW',CFTW(0,multp))
+        UPDATE()
+        t = threading.Thread(target=FT8.AudioStream, args = (qdata, ))
+        t.start() ##starts the class Audiostream
+        print('thread running')
+        #time.sleep(2)
+        frame_count = 0
+        start_time = time.time()
+
+        try:
+            while True:#not qdata.empty():
+                #pass
+                d=qdata.get(timeout=2)
+                if d != 0:
+                    FT8_freq=frequencies[0]+d
+                else:
+                    FT8_freq=0
+                    d='-'
+                AD9959('CSR',CSR(0))
+                AD9959('FR1',[FR1a,FR1b,FR1c])
+                AD9959('CFTW',CFTW(FT8_freq,multp))
+                AD9959('ACR',ACR(power[0]))
+                UPDATE()
+                print(d, end=',')
+                frame_count += 1
+                
+        except queue.Empty:#(queue.Empty,KeyboardInterrupt) as exc: 
+            fr = frame_count / (time.time() - start_time-2)
+            t.join()
+            print()
+            print('average frame rate = {0:.3f} FPS'.format(fr))
+            print('program finished')
+            
+        except KeyboardInterrupt: 
+            fr = frame_count / (time.time() - start_time)
+            t.join()
+            print()
+            print('average frame rate = {0:.3f} FPS'.format(fr))
+            print('program finished')
+			
+    if output.TCP:
+        AD9959('CSR',CSR(0)) ##FT8 to channel 0!
+        AD9959('CFTW',CFTW(0,multp))
+        UPDATE()
+            
+        s.bind((host, port))  # Bind to the port
+        s.listen(5)
+        print('Client listening....')
+            
+        frame_count = 0
+        start_time = time.time()
+            
+        while True:
+            conn, address = s.accept()  # Establish connection with server.
+            print('Got connection from', address)
+            st = 'connected to: '+socket.gethostname()
+            byt = st.encode()
+            conn.send(byt)
+                            
+            while True:
+                try:
+                    data = conn.recv(128)
+                    try:
+                            d=float(data.decode())
+                    except:
+                            d=0
+                    if d != 0:
+                            FT8_freq=frequencies[0]+d
+                    else:
+                            d='-'
+                            FT8_freq=0
+                    AD9959('CSR',CSR(0))
+                    AD9959('FR1',[FR1a,FR1b,FR1c])
+                    AD9959('CFTW',CFTW(FT8_freq,multp))
+                    AD9959('ACR',ACR(power[0]))
+                    UPDATE()
+                    print(d, end='/',flush=True)
+                    frame_count += 1
+                    if not data: break
+                    #x += 1
+
+                except Exception as e:
+                    print(e)
+                    s.close()
+                    break
+
+                except KeyboardInterrupt:
+                    fr = frame_count / (time.time() - start_time)
+                    print()
+                    print('average frame rate = {0:.3f} FPS'.format(fr))
+                    print('program finished')
+                    conn.close()
+		
+		
+		
+		

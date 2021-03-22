@@ -159,39 +159,5 @@ if __name__ == '__main__':
             except KeyboardInterrupt:
                 reset()
                 conn.close()
-    #%%
-##    
-##    t = threading.Thread(target=FT8.AudioStream, args = (qdata, ))
-##    t.start() ##starts the class Audiostream
-##    print('thread running')
-##    #time.sleep(2)
-##    frame_count = 0
-##    start_time = time.time()
-##
-##    try:
-##        while True:#not qdata.empty():
-##            #pass
-##            d=qdata.get(timeout=2)
-##            if d != 0:
-##                FT8_freq=frequencies[0]+d
-##            else:
-##                FT8_freq=0
-##            AD9851(FT8_freq,WORD1)
-##            print(d, end=',')
-##            frame_count += 1
-##            
-##    except queue.Empty:#(queue.Empty,KeyboardInterrupt) as exc: 
-##        fr = frame_count / (time.time() - start_time-2)
-##        t.join()
-##        print()
-##        print('average frame rate = {0:.3f} FPS'.format(fr))
-##        print('program finished')
-##        
-##    except KeyboardInterrupt: 
-##        fr = frame_count / (time.time() - start_time)
-##        t.join()
-##        print()
-##        print('average frame rate = {0:.3f} FPS'.format(fr))
-##        print('program finished')
-
+ 
    
